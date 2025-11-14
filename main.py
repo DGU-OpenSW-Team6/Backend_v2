@@ -11,12 +11,30 @@ from uuid import uuid4
 import io
 import requests
 import torchvision.models as models
-
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
+import httpx
+from jose import jwt
 # ========================================
 #  환경 변수 로드
 # ========================================
-load_dotenv()
+ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(dotenv_path=ENV_PATH)
 app = FastAPI()
+
+# Google OAuth 관련 환경변수
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
+
+SECRET_KEY = "MY_SECRET_JWT_KEY"
+ALGORITHM = "HS256"
+
+
+
+
+
 
 # ========================================
 #  CORS 설정 (Netlify + 로컬)
@@ -49,7 +67,10 @@ BUCKET = os.getenv("S3_BUCKET_NAME")
 # ========================================
 @app.get("/")
 def read_root():
-    return {"message": "DGU OpenSW Team6 Backend Running"}
+    print("DEBUG GOOGLE_CLIENT_ID:", GOOGLE_CLIENT_ID)
+    print("DEBUG GOOGLE_REDIRECT_URI:", GOOGLE_REDIRECT_URI)
+    print("DEBUG GOOGLE_CLIENT_SECRET:", GOOGLE_CLIENT_SECRET)
+    return {"message": "DGU OpenSW Team6 v2 Backend Running"}
 
 # ========================================
 #  테스트용 점수 반환
@@ -127,3 +148,64 @@ async def upload_and_evaluate(file: UploadFile = File(...)):
 
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/login")
+def login():
+    """Google 로그인 페이지로 리다이렉트"""
+    google_auth_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        "?response_type=code"
+        f"&client_id={GOOGLE_CLIENT_ID}"
+        f"&redirect_uri={GOOGLE_REDIRECT_URI}"
+        "&scope=openid%20email%20profile"
+        "&access_type=offline"
+        "&prompt=consent"
+    )
+    return RedirectResponse(google_auth_url)
+
+
+@app.get("/auth/callback")
+async def auth_callback(code: str):
+    """Google OAuth 인증 후 callback"""
+
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "code": code,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "grant_type": "authorization_code"
+    }
+
+    async with httpx.AsyncClient() as client:
+        token_res = await client.post(token_url, data=data)
+
+    if token_res.status_code != 200:
+        raise HTTPException(status_code=400, detail="Failed to fetch Google token")
+
+    tokens = token_res.json()
+    access_token = tokens["access_token"]
+
+    userinfo_url = "https://www.googleapis.com/oauth2/v2/userinfo"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    async with httpx.AsyncClient() as client:
+        userinfo_res = await client.get(userinfo_url, headers=headers)
+
+    if userinfo_res.status_code != 200:
+        raise HTTPException(status_code=400, detail="Failed to fetch user info")
+
+    userinfo = userinfo_res.json()
+
+    payload = {
+        "sub": userinfo["id"],
+        "email": userinfo["email"],
+        "name": userinfo.get("name"),
+    }
+    jwt_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+    return {
+        "google_user": userinfo,
+        "jwt_token": jwt_token
+    }

@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set VIRTUAL_ENV=C:\Users\jelee\OneDrive\바탕 화면\공개SW프로젝트\backend\venv
+set VIRTUAL_ENV=C:\Users\jelee\OneDrive\바탕 화면\공개SW프로젝트\backend_v2\venv
 
 if not defined PROMPT set PROMPT=$P$G
 
