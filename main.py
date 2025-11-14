@@ -69,15 +69,25 @@ s3 = boto3.client(
 )
 BUCKET = os.getenv("S3_BUCKET_NAME")
 
+# ========================================
+#  MySQL 연결
+# ========================================
+import mysql.connector
+
+def get_db():
+    return mysql.connector.connect(
+        host="localhost",
+        user="team6",
+        password="DB_PASSWORD_HERE",  # ★ 너의 비번
+        database="sketchcheck"
+    )
+
 
 # ========================================
 #  기본 테스트 엔드포인트
 # ========================================
 @app.get("/")
 def read_root():
-    print("DEBUG GOOGLE_CLIENT_ID:", GOOGLE_CLIENT_ID)
-    print("DEBUG GOOGLE_REDIRECT_URI:", GOOGLE_REDIRECT_URI)
-    print("DEBUG GOOGLE_CLIENT_SECRET:", GOOGLE_CLIENT_SECRET)
     return {"message": "DGU OpenSW Team6 v2 Backend Running"}
 
 
@@ -130,69 +140,50 @@ def evaluate_image(image_url: str):
 
 
 # ========================================
-#  업로드 + 내부 AI 평가 (로그인 유저 연동)
+#  DB: user 저장
 # ========================================
-@app.post("/upload")
-async def upload_and_evaluate(
-    file: UploadFile = File(...),
-    Authorization: str = Header(None)
-):
-    # 0) 로그인 확인
-    if Authorization is None or not Authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
+def save_user_to_db(userinfo):
+    db = get_db()
+    cursor = db.cursor()
 
-    token = Authorization.split(" ")[1]
-    user = decode_jwt(token)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    google_id = userinfo["id"]
+    email = userinfo.get("email")
+    name = userinfo.get("name")
+    picture = userinfo.get("picture")
 
-    user_id = user["sub"]
+    cursor.execute("SELECT id FROM users WHERE google_id=%s", (google_id,))
+    result = cursor.fetchone()
 
-    try:
-        # ① 파일 확장자 검사
-        file_ext = file.filename.split(".")[-1].lower()
-        if file_ext not in ["jpg", "jpeg", "png"]:
-            return JSONResponse({"error": "지원되지 않는 파일 형식입니다."}, status_code=415)
+    if result:
+        user_id = result[0]
+    else:
+        cursor.execute(
+            "INSERT INTO users (google_id, email, name, profile_url) VALUES (%s, %s, %s, %s)",
+            (google_id, email, name, picture)
+        )
+        db.commit()
+        user_id = cursor.lastrowid
 
-        # ② S3 업로드
-        s3_key = f"uploads/{uuid4()}.{file_ext}"
-        s3.upload_fileobj(file.file, BUCKET, s3_key, ExtraArgs={"ContentType": file.content_type})
-        file_url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
-
-        # ③ AI 평가
-        result = evaluate_image(file_url)
-
-        # ④ 업로드 기록 저장 (DB 대신 파일)
-        with open("uploaded_history.txt", "a", encoding="utf8") as f:
-            f.write(f"{user_id},{file_url}\n")
-
-        return {
-            "user_id": user_id,
-            "image_url": file_url,
-            "predicted_label": result["predicted_label"],
-            "confidence": result["confidence"],
-            "message": "Upload + AI 접근성 평가 완료"
-        }
-
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    cursor.close()
+    db.close()
+    return user_id
 
 
 # ========================================
-#  Google 로그인
+#  DB: 업로드 기록 저장
 # ========================================
-@app.get("/login")
-def login():
-    google_auth_url = (
-        "https://accounts.google.com/o/oauth2/v2/auth"
-        "?response_type=code"
-        f"&client_id={GOOGLE_CLIENT_ID}"
-        f"&redirect_uri={GOOGLE_REDIRECT_URI}"
-        "&scope=openid%20email%20profile"
-        "&access_type=offline"
-        "&prompt=consent"
-    )
-    return RedirectResponse(google_auth_url)
+def save_upload_to_db(user_id, s3_key, file_url, result):
+    db = get_db()
+    cursor = db.cursor()
+
+    cursor.execute("""
+        INSERT INTO uploads (user_id, s3_key, s3_url, predicted_label, confidence)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (user_id, s3_key, file_url, result["predicted_label"], result["confidence"]))
+
+    db.commit()
+    cursor.close()
+    db.close()
 
 
 # ========================================
@@ -200,7 +191,6 @@ def login():
 # ========================================
 @app.get("/auth/callback")
 async def auth_callback(code: str):
-
     token_url = "https://oauth2.googleapis.com/token"
     data = {
         "code": code,
@@ -219,23 +209,23 @@ async def auth_callback(code: str):
     tokens = token_res.json()
     access_token = tokens["access_token"]
 
-    userinfo_url = "https://www.googleapis.com/oauth2/v2/userinfo"
-    headers = {"Authorization": f"Bearer {access_token}"}
-
     async with httpx.AsyncClient() as client:
-        userinfo_res = await client.get(userinfo_url, headers=headers)
-
-    if userinfo_res.status_code != 200:
-        raise HTTPException(status_code=400, detail="Failed to fetch user info")
+        userinfo_res = await client.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
 
     userinfo = userinfo_res.json()
 
-    # 프로필 이미지도 저장
+    # DB 저장
+    user_id = save_user_to_db(userinfo)
+
+    # JWT 생성
     payload = {
-        "sub": userinfo["id"],
+        "sub": user_id,
         "email": userinfo["email"],
         "name": userinfo.get("name"),
-        "picture": userinfo.get("picture")
+        "picture": userinfo.get("picture"),
     }
 
     jwt_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
@@ -247,18 +237,67 @@ async def auth_callback(code: str):
 
 
 # ========================================
-#  마이페이지 (JWT 기반)
+#  업로드 + AI 평가 + 기록 저장
+# ========================================
+@app.post("/upload")
+async def upload_and_evaluate(
+    file: UploadFile = File(...),
+    Authorization: str = Header(None)
+):
+    if Authorization is None or not Authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+
+    token = Authorization.split(" ")[1]
+    user = decode_jwt(token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user_id = user["sub"]
+
+    try:
+        # 파일 확장자 검사
+        file_ext = file.filename.split(".")[-1].lower()
+        if file_ext not in ["jpg", "jpeg", "png"]:
+            return JSONResponse({"error": "지원되지 않는 파일 형식입니다."}, status_code=415)
+
+        # S3 업로드
+        s3_key = f"uploads/{uuid4()}.{file_ext}"
+        s3.upload_fileobj(file.file, BUCKET, s3_key, ExtraArgs={"ContentType": file.content_type})
+        file_url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
+
+        # AI 평가
+        result = evaluate_image(file_url)
+
+        # 텍스트 파일 기록 (기존 기능 유지)
+        with open("uploaded_history.txt", "a", encoding="utf8") as f:
+            f.write(f"{user_id},{file_url}\n")
+
+        # DB 기록 추가
+        save_upload_to_db(user_id, s3_key, file_url, result)
+
+        return {
+            "user_id": user_id,
+            "image_url": file_url,
+            "predicted_label": result["predicted_label"],
+            "confidence": result["confidence"],
+            "message": "Upload + AI 접근성 평가 완료"
+        }
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ========================================
+#  마이페이지
 # ========================================
 @app.get("/mypage")
 async def mypage(Authorization: str = Header(None)):
     if Authorization is None or not Authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
 
-    token = Authorization.split(" ")[1]
-    user = decode_jwt(token)
-
+    user = decode_jwt(Authorization.split(" ")[1])
     if user is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        raise HTTPException(status_code=401, detail="Invalid token")
 
     return {
         "email": user["email"],
@@ -268,7 +307,22 @@ async def mypage(Authorization: str = Header(None)):
 
 
 # ========================================
-#  내가 업로드한 이미지 목록 조회
+#  DB 기반 업로드 목록 조회
+# ========================================
+def get_uploads_from_db(user_id):
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+
+    cursor.execute("SELECT s3_url, created_at FROM uploads WHERE user_id=%s ORDER BY created_at DESC", (user_id,))
+    result = cursor.fetchall()
+
+    cursor.close()
+    db.close()
+    return result
+
+
+# ========================================
+#  내가 업로드한 기록 조회 (파일 + DB)
 # ========================================
 @app.get("/myuploads")
 async def my_uploads(Authorization: str = Header(None)):
@@ -282,12 +336,19 @@ async def my_uploads(Authorization: str = Header(None)):
 
     user_id = user["sub"]
 
-    uploads = []
+    # 기존 파일 기반 조회 유지
+    uploads_file = []
     if os.path.exists("uploaded_history.txt"):
         with open("uploaded_history.txt", "r", encoding="utf8") as f:
             for line in f:
                 uid, url = line.strip().split(",")
-                if uid == user_id:
-                    uploads.append(url)
+                if str(uid) == str(user_id):
+                    uploads_file.append(url)
 
-    return {"uploads": uploads}
+    # DB 기반 조회 추가
+    uploads_db = get_uploads_from_db(user_id)
+
+    return {
+        "uploads_textfile": uploads_file,
+        "uploads_db": uploads_db
+    }
