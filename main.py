@@ -31,7 +31,6 @@ GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 SECRET_KEY = "MY_SECRET_JWT_KEY"
 ALGORITHM = "HS256"
 
-
 # ========================================
 #  JWT 해독 함수
 # ========================================
@@ -42,9 +41,8 @@ def decode_jwt(token: str):
     except Exception:
         return None
 
-
 # ========================================
-#  CORS 설정 (Netlify + 로컬)
+#  CORS 설정
 # ========================================
 origins = [
     "https://mysketchcheck.netlify.app",
@@ -78,10 +76,9 @@ def get_db():
     return mysql.connector.connect(
         host="localhost",
         user="team6",
-        password="DB_PASSWORD_HERE",  # ★ 너의 비번
+        password="0000",
         database="sketchcheck"
     )
-
 
 # ========================================
 #  기본 테스트 엔드포인트
@@ -90,14 +87,12 @@ def get_db():
 def read_root():
     return {"message": "DGU OpenSW Team6 v2 Backend Running"}
 
-
 # ========================================
 #  테스트용 점수 반환
 # ========================================
 @app.get("/returnScore")
 def return_score():
     return {"점수": [1, 2, 3, 4], "평가": ['a', 'b', 'c', 'd']}
-
 
 # ========================================
 #  모델 로드
@@ -107,7 +102,6 @@ model = models.resnet34(num_classes=21)
 state_dict = torch.load(MODEL_PATH, map_location="cpu")
 model.load_state_dict(state_dict, strict=False)
 model.eval()
-
 
 # ========================================
 #  내부 함수: 이미지 평가
@@ -133,11 +127,15 @@ def evaluate_image(image_url: str):
         pred_label = torch.argmax(prob, dim=1).item()
         confidence = torch.max(prob).item()
 
+    # (★) 이후 확장 예정 — 점수 4개도 여기에 포함하여 result 리턴하면 됨
     return {
         "predicted_label": int(pred_label),
-        "confidence": round(confidence * 100, 2)
+        "confidence": round(confidence * 100, 2),
+        "score1": 0.0,
+        "score2": 0.0,
+        "score3": 0.0,
+        "score4": 0.0,
     }
-
 
 # ========================================
 #  DB: user 저장
@@ -168,23 +166,28 @@ def save_user_to_db(userinfo):
     db.close()
     return user_id
 
-
 # ========================================
-#  DB: 업로드 기록 저장
+#  DB: 업로드 기록 저장 (★ score1~4 포함)
 # ========================================
 def save_upload_to_db(user_id, s3_key, file_url, result):
     db = get_db()
     cursor = db.cursor()
 
     cursor.execute("""
-        INSERT INTO uploads (user_id, s3_key, s3_url, predicted_label, confidence)
-        VALUES (%s, %s, %s, %s, %s)
-    """, (user_id, s3_key, file_url, result["predicted_label"], result["confidence"]))
+        INSERT INTO uploads
+        (user_id, s3_key, s3_url,
+         predicted_label, confidence,
+         score1, score2, score3, score4)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        user_id, s3_key, file_url,
+        result["predicted_label"], result["confidence"],
+        result["score1"], result["score2"], result["score3"], result["score4"]
+    ))
 
     db.commit()
     cursor.close()
     db.close()
-
 
 # ========================================
 #  Google OAuth Callback
@@ -217,10 +220,8 @@ async def auth_callback(code: str):
 
     userinfo = userinfo_res.json()
 
-    # DB 저장
     user_id = save_user_to_db(userinfo)
 
-    # JWT 생성
     payload = {
         "sub": user_id,
         "email": userinfo["email"],
@@ -235,9 +236,8 @@ async def auth_callback(code: str):
         "jwt_token": jwt_token
     }
 
-
 # ========================================
-#  업로드 + AI 평가 + 기록 저장
+#  업로드 + 평가 + 저장
 # ========================================
 @app.post("/upload")
 async def upload_and_evaluate(
@@ -255,24 +255,19 @@ async def upload_and_evaluate(
     user_id = user["sub"]
 
     try:
-        # 파일 확장자 검사
         file_ext = file.filename.split(".")[-1].lower()
         if file_ext not in ["jpg", "jpeg", "png"]:
             return JSONResponse({"error": "지원되지 않는 파일 형식입니다."}, status_code=415)
 
-        # S3 업로드
         s3_key = f"uploads/{uuid4()}.{file_ext}"
         s3.upload_fileobj(file.file, BUCKET, s3_key, ExtraArgs={"ContentType": file.content_type})
         file_url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
 
-        # AI 평가
         result = evaluate_image(file_url)
 
-        # 텍스트 파일 기록 (기존 기능 유지)
         with open("uploaded_history.txt", "a", encoding="utf8") as f:
             f.write(f"{user_id},{file_url}\n")
 
-        # DB 기록 추가
         save_upload_to_db(user_id, s3_key, file_url, result)
 
         return {
@@ -280,12 +275,15 @@ async def upload_and_evaluate(
             "image_url": file_url,
             "predicted_label": result["predicted_label"],
             "confidence": result["confidence"],
+            "score1": result["score1"],
+            "score2": result["score2"],
+            "score3": result["score3"],
+            "score4": result["score4"],
             "message": "Upload + AI 접근성 평가 완료"
         }
 
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 # ========================================
 #  마이페이지
@@ -305,7 +303,6 @@ async def mypage(Authorization: str = Header(None)):
         "profile_image": user.get("picture")
     }
 
-
 # ========================================
 #  DB 기반 업로드 목록 조회
 # ========================================
@@ -313,16 +310,26 @@ def get_uploads_from_db(user_id):
     db = get_db()
     cursor = db.cursor(dictionary=True)
 
-    cursor.execute("SELECT s3_url, created_at FROM uploads WHERE user_id=%s ORDER BY created_at DESC", (user_id,))
+    cursor.execute("""
+        SELECT
+            s3_url,
+            predicted_label,
+            confidence,
+            score1, score2, score3, score4,
+            created_at
+        FROM uploads
+        WHERE user_id=%s
+        ORDER BY created_at DESC
+    """, (user_id,))
+
     result = cursor.fetchall()
 
     cursor.close()
     db.close()
     return result
 
-
 # ========================================
-#  내가 업로드한 기록 조회 (파일 + DB)
+#  내가 올린 업로드 조회
 # ========================================
 @app.get("/myuploads")
 async def my_uploads(Authorization: str = Header(None)):
@@ -336,7 +343,6 @@ async def my_uploads(Authorization: str = Header(None)):
 
     user_id = user["sub"]
 
-    # 기존 파일 기반 조회 유지
     uploads_file = []
     if os.path.exists("uploaded_history.txt"):
         with open("uploaded_history.txt", "r", encoding="utf8") as f:
@@ -345,7 +351,6 @@ async def my_uploads(Authorization: str = Header(None)):
                 if str(uid) == str(user_id):
                     uploads_file.append(url)
 
-    # DB 기반 조회 추가
     uploads_db = get_uploads_from_db(user_id)
 
     return {
