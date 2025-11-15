@@ -47,14 +47,18 @@ def decode_jwt(token: str):
 origins = [
     "https://mysketchcheck.netlify.app",
     "http://localhost:5173",
+    "https://sketchcheck.shop",
+    "https://www.sketchcheck.shop",
 ]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*", "Authorization"],
 )
+
 
 # ========================================
 #  AWS S3 설정
@@ -127,7 +131,6 @@ def evaluate_image(image_url: str):
         pred_label = torch.argmax(prob, dim=1).item()
         confidence = torch.max(prob).item()
 
-    # (★) 이후 확장 예정 — 점수 4개도 여기에 포함하여 result 리턴하면 됨
     return {
         "predicted_label": int(pred_label),
         "confidence": round(confidence * 100, 2),
