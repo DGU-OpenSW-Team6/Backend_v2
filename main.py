@@ -15,6 +15,12 @@ import httpx
 from jose import jwt
 
 # ========================================
+#  Security: Swagger + FastAPI 연동
+# ========================================
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+security = HTTPBearer()  # ★ Swagger Authorize 버튼과 API 연결 핵심
+
+# ========================================
 #  환경 변수 로드
 # ========================================
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
@@ -241,10 +247,10 @@ async def auth_callback(code: str):
 # ========================================
 #  업로드 + 평가 + 저장
 # ========================================
-@app.post("/upload")
+@app.post("/upload", dependencies=[Depends(security)])  # ★ Swagger 보안 적용
 async def upload_and_evaluate(
     file: UploadFile = File(...),
-    authorization: str = Header(None, alias="Authorization")   # ★ 수정됨
+    authorization: str = Header(None, alias="Authorization")  # ★ 헤더 인식 적용
 ):
     if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
@@ -290,8 +296,8 @@ async def upload_and_evaluate(
 # ========================================
 #  마이페이지
 # ========================================
-@app.get("/mypage")
-async def mypage(authorization: str = Header(None, alias="Authorization")):   # ★ 수정됨
+@app.get("/mypage", dependencies=[Depends(security)])  # ★ 보안 적용
+async def mypage(authorization: str = Header(None, alias="Authorization")):
     if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
 
@@ -333,8 +339,8 @@ def get_uploads_from_db(user_id):
 # ========================================
 #  내가 올린 업로드 조회
 # ========================================
-@app.get("/myuploads")
-async def my_uploads(authorization: str = Header(None, alias="Authorization")):   # ★ 수정됨
+@app.get("/myuploads", dependencies=[Depends(security)])  # ★ 보안 적용
+async def my_uploads(authorization: str = Header(None, alias="Authorization")):
     if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
 
