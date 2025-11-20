@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Header
+from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 import torch
@@ -58,7 +58,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*", "Authorization"],
 )
-
 
 # ========================================
 #  AWS S3 설정
@@ -170,7 +169,7 @@ def save_user_to_db(userinfo):
     return user_id
 
 # ========================================
-#  DB: 업로드 기록 저장 (★ score1~4 포함)
+#  DB: 업로드 기록 저장
 # ========================================
 def save_upload_to_db(user_id, s3_key, file_url, result):
     db = get_db()
@@ -245,12 +244,12 @@ async def auth_callback(code: str):
 @app.post("/upload")
 async def upload_and_evaluate(
     file: UploadFile = File(...),
-    Authorization: str = Header(None)
+    authorization: str = Header(None, alias="Authorization")   # ★ 수정됨
 ):
-    if Authorization is None or not Authorization.startswith("Bearer "):
+    if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
 
-    token = Authorization.split(" ")[1]
+    token = authorization.split(" ")[1]
     user = decode_jwt(token)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -292,11 +291,11 @@ async def upload_and_evaluate(
 #  마이페이지
 # ========================================
 @app.get("/mypage")
-async def mypage(Authorization: str = Header(None)):
-    if Authorization is None or not Authorization.startswith("Bearer "):
+async def mypage(authorization: str = Header(None, alias="Authorization")):   # ★ 수정됨
+    if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
 
-    user = decode_jwt(Authorization.split(" ")[1])
+    user = decode_jwt(authorization.split(" ")[1])
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -335,11 +334,11 @@ def get_uploads_from_db(user_id):
 #  내가 올린 업로드 조회
 # ========================================
 @app.get("/myuploads")
-async def my_uploads(Authorization: str = Header(None)):
-    if Authorization is None or not Authorization.startswith("Bearer "):
+async def my_uploads(authorization: str = Header(None, alias="Authorization")):   # ★ 수정됨
+    if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
 
-    token = Authorization.split(" ")[1]
+    token = authorization.split(" ")[1]
     user = decode_jwt(token)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
