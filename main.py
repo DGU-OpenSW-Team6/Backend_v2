@@ -200,6 +200,52 @@ async def upload_and_analyze(
         "message": "Upload + AI 평가 완료",
     }
 
+
+# ========================================
+#  로컬 테스트용 업로드 API (인증 없음 / DB 없음 / S3 없음)
+# ========================================
+@app.post("/uploadonlyfortest")
+async def upload_only_for_test(file: UploadFile = File(...)):
+    print("[POST /uploadonlyfortest] called")
+
+    # 파일 확장자 검사
+    ext = file.filename.split(".")[-1].lower()
+    if ext not in ["jpg", "jpeg", "png"]:
+        return JSONResponse({"error": "지원되지 않는 파일 형식입니다."}, status_code=415)
+
+    # S3 업로드 경로 생성
+    s3_key = f"uploads/{uuid4()}.{ext}"
+    print("[/uploadonlyfortest] Upload →", s3_key)
+
+    # S3에 업로드
+    s3.upload_fileobj(
+        file.file,
+        BUCKET,
+        s3_key,
+        ExtraArgs={"ContentType": file.content_type},
+    )
+
+    # S3 URL 생성
+    url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
+    print("[/uploadonlyfortest] S3 URL:", url)
+
+    # 업로드된 이미지 다시 다운로드 → AI 처리
+    img_res = requests.get(url)
+    img_bytes = img_res.content
+
+    print("[/uploadonlyfortest] Running AI pipeline...")
+    ai_result = run_full_ai_pipeline(img_bytes)
+    print("[/uploadonlyfortest] AI pipeline finished")
+
+    # DB 없음 / JWT 없음
+    return {
+        "file_name": file.filename,
+        "s3_url": url,
+        "ai_result": ai_result,
+        "message": "Upload + S3 저장 + AI 분석 완료 (TEST MODE: no DB, no JWT)"
+    }
+
+
 # ========================================
 #  마이페이지
 # ========================================
@@ -285,7 +331,7 @@ async def auth_callback(code: str):
     userinfo = userinfo_res.json()
     print("[auth_callback] userinfo =", userinfo)
 
-    # 여기 기존 코드 유지: DB 저장 (필요하다면 포함)
+    # 여기 기존 코드 유지: DB 저장
     # JWT 생성
     payload = {
         "sub": str(userinfo["id"]),
