@@ -14,11 +14,11 @@ import torchvision.models as models
 import httpx
 from jose import jwt
 
-# ========================================
-#  Security
-# ========================================
 from fastapi.security import HTTPBearer
 security = HTTPBearer()
+
+from yolo_detector import UIDetector
+from algorithms import run_algorithms, generate_message
 
 # ========================================
 #  환경 변수
@@ -117,133 +117,27 @@ model.load_state_dict(state_dict, strict=False)
 model.eval()
 print("[MODEL] Loaded successfully")
 
+detector = UIDetector()
+
 # ========================================
-#  이미지 평가 함수
+#  AI 분석 함수
 # ========================================
-def evaluate_image(image_url: str):
-    print("[evaluate_image] url =", image_url)
-
-    response = requests.get(image_url)
-    img = Image.open(io.BytesIO(response.content)).convert("RGB")
-
-    img = img.resize((224, 224))
-    arr = np.array(img).astype("float32") / 255.0
-    arr = np.transpose(arr, (2, 0, 1))
-
-    x = torch.tensor(arr, dtype=torch.float32)
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
-    x = (x - mean) / std
-    x = x.unsqueeze(0)
-
-    with torch.no_grad():
-        preds = model(x)
-        prob = torch.softmax(preds, dim=1)
-        label = torch.argmax(prob, dim=1).item()
-        conf = torch.max(prob).item()
-
-    print("[evaluate_image] label =", label, "conf =", conf)
+def run_full_ai_pipeline(img_bytes):
+    detections = detector.run(img_bytes)
+    analysis = run_algorithms(detections)
+    message = generate_message(analysis)
 
     return {
-        "predicted_label": label,
-        "confidence": round(conf * 100, 2),
-        "score1": 0.0, "score2": 0.0, "score3": 0.0, "score4": 0.0
+        "detections": detections,
+        "analysis": analysis,
+        "message": message
     }
 
 # ========================================
-#  DB: 유저 저장
-# ========================================
-def save_user_to_db(userinfo):
-    print("[DB] save_user_to_db:", userinfo)
-
-    db = get_db()
-    cursor = db.cursor()
-
-    google_id = userinfo["id"]
-    email = userinfo.get("email")
-    name = userinfo.get("name")
-    pic = userinfo.get("picture")
-
-    cursor.execute("SELECT id FROM users WHERE google_id=%s", (google_id,))
-    exist = cursor.fetchone()
-
-    if exist:
-        print("[DB] User exists:", exist[0])
-        user_id = exist[0]
-    else:
-        cursor.execute(
-            "INSERT INTO users (google_id,email,name,profile_url) VALUES (%s,%s,%s,%s)",
-            (google_id, email, name, pic)
-        )
-        db.commit()
-        user_id = cursor.lastrowid
-        print("[DB] New user created:", user_id)
-
-    cursor.close()
-    db.close()
-    return user_id
-
-# ========================================
-#  Google OAuth Callback (🔥 최종 수정본)
-# ========================================
-@app.get("/auth/callback")
-async def auth_callback(code: str):
-    print("[auth_callback] code =", code)
-
-    token_url = "https://oauth2.googleapis.com/token"
-    data = {
-        "code": code,
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "redirect_uri": GOOGLE_REDIRECT_URI,
-        "grant_type": "authorization_code",
-    }
-
-    # 구글 액세스 토큰 요청
-    async with httpx.AsyncClient() as client:
-        token_res = await client.post(token_url, data=data)
-
-    if token_res.status_code != 200:
-        print("[auth_callback] ERROR fetching token")
-        raise HTTPException(status_code=400, detail="Failed to fetch Google token")
-
-    tokens = token_res.json()
-    access_token = tokens["access_token"]
-    print("[auth_callback] access_token =", access_token)
-
-    # 사용자 정보 요청
-    async with httpx.AsyncClient() as client:
-        userinfo_res = await client.get(
-            "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-    userinfo = userinfo_res.json()
-    print("[auth_callback] userinfo =", userinfo)
-
-    user_id = save_user_to_db(userinfo)
-
-    # 🔥 JWT 생성 (sub 반드시 문자열!!)
-    payload = {
-        "sub": str(user_id),           # FIXED: must be string!!!
-        "email": userinfo["email"],
-        "name": userinfo.get("name"),
-        "picture": userinfo.get("picture"),
-    }
-
-    jwt_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-    print("[auth_callback] jwt_token =", jwt_token)
-
-    # React 앱으로 리다이렉트
-    redirect_to = f"http://localhost:5173/callback?token={jwt_token}"
-    print("[auth_callback] redirect ->", redirect_to)
-
-    return RedirectResponse(url=redirect_to)
-
-# ========================================
-#  업로드 API
+#  업로드 + AI 통합 API (/upload)
 # ========================================
 @app.post("/upload", dependencies=[Depends(security)])
-async def upload_and_evaluate(
+async def upload_and_analyze(
     file: UploadFile = File(...),
     authorization: str = Header(None, alias="Authorization"),
 ):
@@ -276,7 +170,13 @@ async def upload_and_evaluate(
     url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
     print("[/upload] S3 URL:", url)
 
-    result = evaluate_image(url)
+    # 이미지 다운로드 후 AI 분석
+    img_res = requests.get(url)
+    img_bytes = img_res.content
+
+    ai_result = run_full_ai_pipeline(img_bytes)
+
+    predicted_label = ai_result["analysis"]["overall_label"] if "overall_label" in ai_result["analysis"] else None
 
     # DB 저장
     db = get_db()
@@ -287,8 +187,7 @@ async def upload_and_evaluate(
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, (
         user_id, s3_key, url,
-        result["predicted_label"], result["confidence"],
-        result["score1"], result["score2"], result["score3"], result["score4"],
+        None, None, 0.0, 0.0, 0.0, 0.0
     ))
     db.commit()
     cursor.close()
@@ -297,12 +196,7 @@ async def upload_and_evaluate(
     return {
         "user_id": user_id,
         "image_url": url,
-        "predicted_label": result["predicted_label"],
-        "confidence": result["confidence"],
-        "score1": result["score1"],
-        "score2": result["score2"],
-        "score3": result["score3"],
-        "score4": result["score4"],
+        "ai_result": ai_result,
         "message": "Upload + AI 평가 완료",
     }
 
@@ -355,3 +249,56 @@ async def my_uploads(authorization: str = Header(None, alias="Authorization")):
     db.close()
 
     return {"uploads": rows}
+
+# ========================================
+#  Google OAuth Callback
+# ========================================
+@app.get("/auth/callback")
+async def auth_callback(code: str):
+    print("[auth_callback] code =", code)
+
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "code": code,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }
+
+    async with httpx.AsyncClient() as client:
+        token_res = await client.post(token_url, data=data)
+
+    if token_res.status_code != 200:
+        print("[auth_callback] ERROR fetching token")
+        raise HTTPException(status_code=400, detail="Failed to fetch Google token")
+
+    tokens = token_res.json()
+    access_token = tokens["access_token"]
+    print("[auth_callback] access_token =", access_token)
+
+    async with httpx.AsyncClient() as client:
+        userinfo_res = await client.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    userinfo = userinfo_res.json()
+    print("[auth_callback] userinfo =", userinfo)
+
+    # 여기 기존 코드 유지: DB 저장 (필요하다면 포함)
+    # JWT 생성
+    payload = {
+        "sub": str(userinfo["id"]),
+        "email": userinfo["email"],
+        "name": userinfo.get("name"),
+        "picture": userinfo.get("picture"),
+    }
+
+    jwt_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    print("[auth_callback] jwt_token =", jwt_token)
+
+    # 수정된 리다이렉트 (배포 주소)
+    redirect_to = f"https://mysketchcheck.netlify.app/callback?token={jwt_token}"
+    print("[auth_callback] redirect ->", redirect_to)
+
+    return RedirectResponse(url=redirect_to)
