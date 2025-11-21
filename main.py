@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Depends, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 import torch
@@ -15,24 +15,21 @@ import httpx
 from jose import jwt
 
 # ========================================
-#  Security: Swagger + FastAPI 연동
+#  Security
 # ========================================
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer
 security = HTTPBearer()
 
 # ========================================
-#  환경 변수 로드
+#  환경 변수
 # ========================================
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=ENV_PATH)
-app = FastAPI()
 
-print("=== 서버 시작됨 ===")
+app = FastAPI()
+print("=== FastAPI Backend Started ===")
 print("GOOGLE_REDIRECT_URI =", os.getenv("GOOGLE_REDIRECT_URI"))
 
-# ========================================
-#  Google OAuth 관련 환경변수
-# ========================================
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
@@ -41,20 +38,7 @@ SECRET_KEY = "MY_SECRET_JWT_KEY"
 ALGORITHM = "HS256"
 
 # ========================================
-#  JWT 해독 함수
-# ========================================
-def decode_jwt(token: str):
-    print("[decode_jwt] token =", token)
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        print("[decode_jwt] payload =", payload)
-        return payload
-    except Exception as e:
-        print("[decode_jwt] ERROR =", e)
-        return None
-
-# ========================================
-#  CORS 설정
+#  CORS
 # ========================================
 origins = [
     "https://mysketchcheck.netlify.app",
@@ -72,7 +56,7 @@ app.add_middleware(
 )
 
 # ========================================
-#  AWS S3 설정
+#  AWS S3
 # ========================================
 s3 = boto3.client(
     "s3",
@@ -83,12 +67,12 @@ s3 = boto3.client(
 BUCKET = os.getenv("S3_BUCKET_NAME")
 
 # ========================================
-#  MySQL 연결
+#  MySQL
 # ========================================
 import mysql.connector
 
 def get_db():
-    print("[MySQL] Connecting...")
+    print("[DB] Opening connection…")
     return mysql.connector.connect(
         host="localhost",
         user="team6",
@@ -97,26 +81,36 @@ def get_db():
     )
 
 # ========================================
-#  기본 테스트 엔드포인트
+#  JWT 해독
+# ========================================
+def decode_jwt(token: str):
+    print("[decode_jwt] token =", token)
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        print("[decode_jwt] payload =", payload)
+        return payload
+    except Exception as e:
+        print("[decode_jwt] ERROR =", e)
+        return None
+
+# ========================================
+#  기본 API
 # ========================================
 @app.get("/")
 def read_root():
     print("GET /")
     return {"message": "DGU OpenSW Team6 v2 Backend Running"}
 
-# ========================================
-#  테스트용 점수 반환
-# ========================================
 @app.get("/returnScore")
 def return_score():
     print("GET /returnScore")
-    return {"점수": [1, 2, 3, 4], "평가": ['a', 'b', 'c', 'd']}
+    return {"점수": [1,2,3,4], "평가": ["a","b","c","d"]}
 
 # ========================================
 #  모델 로드
 # ========================================
-MODEL_PATH = "ui_classifier.pt"
 print("[MODEL] Loading model...")
+MODEL_PATH = "ui_classifier.pt"
 model = models.resnet34(num_classes=21)
 state_dict = torch.load(MODEL_PATH, map_location="cpu")
 model.load_state_dict(state_dict, strict=False)
@@ -124,43 +118,40 @@ model.eval()
 print("[MODEL] Loaded successfully")
 
 # ========================================
-#  내부 함수: 이미지 평가
+#  이미지 평가 함수
 # ========================================
 def evaluate_image(image_url: str):
-    print("[evaluate_image] image_url =", image_url)
+    print("[evaluate_image] url =", image_url)
+
     response = requests.get(image_url)
-    image = Image.open(io.BytesIO(response.content)).convert("RGB")
+    img = Image.open(io.BytesIO(response.content)).convert("RGB")
 
-    img_size = 224
-    IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-    IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-
-    image = image.resize((img_size, img_size))
-    arr = np.array(image).astype('float32') / 255.0
+    img = img.resize((224, 224))
+    arr = np.array(img).astype("float32") / 255.0
     arr = np.transpose(arr, (2, 0, 1))
+
     x = torch.tensor(arr, dtype=torch.float32)
-    x = (x - IMAGENET_MEAN) / IMAGENET_STD
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
+    x = (x - mean) / std
     x = x.unsqueeze(0)
 
     with torch.no_grad():
         preds = model(x)
         prob = torch.softmax(preds, dim=1)
-        pred_label = torch.argmax(prob, dim=1).item()
-        confidence = torch.max(prob).item()
+        label = torch.argmax(prob, dim=1).item()
+        conf = torch.max(prob).item()
 
-    print("[evaluate_image] pred =", pred_label, "conf =", confidence)
+    print("[evaluate_image] label =", label, "conf =", conf)
 
     return {
-        "predicted_label": int(pred_label),
-        "confidence": round(confidence * 100, 2),
-        "score1": 0.0,
-        "score2": 0.0,
-        "score3": 0.0,
-        "score4": 0.0,
+        "predicted_label": label,
+        "confidence": round(conf * 100, 2),
+        "score1": 0.0, "score2": 0.0, "score3": 0.0, "score4": 0.0
     }
 
 # ========================================
-#  DB: user 저장
+#  DB: 유저 저장
 # ========================================
 def save_user_to_db(userinfo):
     print("[DB] save_user_to_db:", userinfo)
@@ -171,18 +162,18 @@ def save_user_to_db(userinfo):
     google_id = userinfo["id"]
     email = userinfo.get("email")
     name = userinfo.get("name")
-    picture = userinfo.get("picture")
+    pic = userinfo.get("picture")
 
     cursor.execute("SELECT id FROM users WHERE google_id=%s", (google_id,))
-    result = cursor.fetchone()
+    exist = cursor.fetchone()
 
-    if result:
-        print("[DB] Existing user:", result[0])
-        user_id = result[0]
+    if exist:
+        print("[DB] User exists:", exist[0])
+        user_id = exist[0]
     else:
         cursor.execute(
-            "INSERT INTO users (google_id, email, name, profile_url) VALUES (%s, %s, %s, %s)",
-            (google_id, email, name, picture)
+            "INSERT INTO users (google_id,email,name,profile_url) VALUES (%s,%s,%s,%s)",
+            (google_id, email, name, pic)
         )
         db.commit()
         user_id = cursor.lastrowid
@@ -193,7 +184,7 @@ def save_user_to_db(userinfo):
     return user_id
 
 # ========================================
-#  Google OAuth Callback (수정됨)
+#  Google OAuth Callback (🔥 최종 수정본)
 # ========================================
 @app.get("/auth/callback")
 async def auth_callback(code: str):
@@ -205,35 +196,35 @@ async def auth_callback(code: str):
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
         "redirect_uri": GOOGLE_REDIRECT_URI,
-        "grant_type": "authorization_code"
+        "grant_type": "authorization_code",
     }
 
-    print("[auth_callback] Fetching Google tokens...")
-
+    # 구글 액세스 토큰 요청
     async with httpx.AsyncClient() as client:
         token_res = await client.post(token_url, data=data)
 
     if token_res.status_code != 200:
-        print("[auth_callback] ERROR: Token fetch failed")
+        print("[auth_callback] ERROR fetching token")
         raise HTTPException(status_code=400, detail="Failed to fetch Google token")
 
     tokens = token_res.json()
     access_token = tokens["access_token"]
-    print("[auth_callback] AccessToken =", access_token)
+    print("[auth_callback] access_token =", access_token)
 
+    # 사용자 정보 요청
     async with httpx.AsyncClient() as client:
         userinfo_res = await client.get(
             "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={"Authorization": f"Bearer {access_token}"}
+            headers={"Authorization": f"Bearer {access_token}"},
         )
-
     userinfo = userinfo_res.json()
     print("[auth_callback] userinfo =", userinfo)
 
     user_id = save_user_to_db(userinfo)
 
+    # 🔥 JWT 생성 (sub 반드시 문자열!!)
     payload = {
-        "sub": user_id,
+        "sub": str(user_id),           # FIXED: must be string!!!
         "email": userinfo["email"],
         "name": userinfo.get("name"),
         "picture": userinfo.get("picture"),
@@ -242,75 +233,78 @@ async def auth_callback(code: str):
     jwt_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
     print("[auth_callback] jwt_token =", jwt_token)
 
-    # 🔥 React로 리다이렉트
-    redirect_url = f"http://localhost:5173/callback?token={jwt_token}"
-    print("[auth_callback] redirect to =", redirect_url)
+    # React 앱으로 리다이렉트
+    redirect_to = f"http://localhost:5173/callback?token={jwt_token}"
+    print("[auth_callback] redirect ->", redirect_to)
 
-    return RedirectResponse(url=redirect_url)
+    return RedirectResponse(url=redirect_to)
 
 # ========================================
-#  업로드 + 평가 + 저장
+#  업로드 API
 # ========================================
 @app.post("/upload", dependencies=[Depends(security)])
 async def upload_and_evaluate(
     file: UploadFile = File(...),
-    authorization: str = Header(None, alias="Authorization")
+    authorization: str = Header(None, alias="Authorization"),
 ):
     print("[POST /upload] called")
-    print("[POST /upload] Authorization =", authorization)
+    print("Authorization =", authorization)
 
     if authorization is None or not authorization.startswith("Bearer "):
-        print("[POST /upload] ERROR: Missing Bearer")
+        print("[/upload] error missing token")
         raise HTTPException(status_code=401, detail="Missing token")
 
     token = authorization.split(" ")[1]
     user = decode_jwt(token)
     if user is None:
-        print("[POST /upload] ERROR: Invalid token")
+        print("[/upload] decode failed")
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user_id = user["sub"]
-    print("[POST /upload] user_id =", user_id)
+    print("[/upload] user_id =", user_id)
 
-    try:
-        file_ext = file.filename.split(".")[-1].lower()
-        print("[POST /upload] Uploaded file_ext =", file_ext)
+    # 파일 검사
+    ext = file.filename.split(".")[-1].lower()
+    if ext not in ["jpg", "jpeg", "png"]:
+        return JSONResponse({"error": "지원되지 않는 파일 형식입니다."}, status_code=415)
 
-        if file_ext not in ["jpg", "jpeg", "png"]:
-            print("[POST /upload] ERROR: Unsupported format")
-            return JSONResponse({"error": "지원되지 않는 파일 형식입니다."}, status_code=415)
+    s3_key = f"uploads/{uuid4()}.{ext}"
+    print("[/upload] Upload →", s3_key)
 
-        s3_key = f"uploads/{uuid4()}.{file_ext}"
-        print("[POST /upload] s3_key =", s3_key)
+    s3.upload_fileobj(file.file, BUCKET, s3_key, ExtraArgs={"ContentType": file.content_type})
 
-        s3.upload_fileobj(file.file, BUCKET, s3_key, ExtraArgs={"ContentType": file.content_type})
-        file_url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
+    url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
+    print("[/upload] S3 URL:", url)
 
-        print("[POST /upload] file_url =", file_url)
+    result = evaluate_image(url)
 
-        result = evaluate_image(file_url)
+    # DB 저장
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("""
+        INSERT INTO uploads (user_id, s3_key, s3_url,
+            predicted_label, confidence, score1, score2, score3, score4)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        user_id, s3_key, url,
+        result["predicted_label"], result["confidence"],
+        result["score1"], result["score2"], result["score3"], result["score4"],
+    ))
+    db.commit()
+    cursor.close()
+    db.close()
 
-        with open("uploaded_history.txt", "a", encoding="utf8") as f:
-            f.write(f"{user_id},{file_url}\n")
-
-        save_upload_to_db(user_id, s3_key, file_url, result)
-
-        print("[POST /upload] SUCCESS")
-        return {
-            "user_id": user_id,
-            "image_url": file_url,
-            "predicted_label": result["predicted_label"],
-            "confidence": result["confidence"],
-            "score1": result["score1"],
-            "score2": result["score2"],
-            "score3": result["score3"],
-            "score4": result["score4"],
-            "message": "Upload + AI 접근성 평가 완료"
-        }
-
-    except Exception as e:
-        print("[POST /upload] ERROR:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+    return {
+        "user_id": user_id,
+        "image_url": url,
+        "predicted_label": result["predicted_label"],
+        "confidence": result["confidence"],
+        "score1": result["score1"],
+        "score2": result["score2"],
+        "score3": result["score3"],
+        "score4": result["score4"],
+        "message": "Upload + AI 평가 완료",
+    }
 
 # ========================================
 #  마이페이지
@@ -320,55 +314,44 @@ async def mypage(authorization: str = Header(None, alias="Authorization")):
     print("GET /mypage")
 
     if authorization is None or not authorization.startswith("Bearer "):
-        print("[/mypage] ERROR: Missing Bearer")
         raise HTTPException(status_code=401, detail="Missing token")
 
     user = decode_jwt(authorization.split(" ")[1])
     if user is None:
-        print("[/mypage] ERROR: Invalid token")
         raise HTTPException(status_code=401, detail="Invalid token")
-
-    print("[/mypage] user =", user)
 
     return {
         "email": user["email"],
-        "name": user.get("name"),
-        "profile_image": user.get("picture")
+        "name": user["name"],
+        "profile_image": user["picture"],
     }
 
 # ========================================
-#  내가 올린 업로드 조회
+#  업로드 목록 조회
 # ========================================
 @app.get("/myuploads", dependencies=[Depends(security)])
 async def my_uploads(authorization: str = Header(None, alias="Authorization")):
     print("GET /myuploads")
 
     if authorization is None or not authorization.startswith("Bearer "):
-        print("[/myuploads] ERROR: Missing Bearer")
         raise HTTPException(status_code=401, detail="Missing token")
 
-    token = authorization.split(" ")[1]
-    user = decode_jwt(token)
+    user = decode_jwt(authorization.split(" ")[1])
     if user is None:
-        print("[/myuploads] ERROR: Invalid token")
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user_id = user["sub"]
-    print("[/myuploads] user_id =", user_id)
 
-    uploads_file = []
-    if os.path.exists("uploaded_history.txt"):
-        with open("uploaded_history.txt", "r", encoding="utf8") as f:
-            for line in f:
-                uid, url = line.strip().split(",")
-                if str(uid) == str(user_id):
-                    uploads_file.append(url)
+    db = get_db()
+    cursor = db.cursor(dictionary=True)
+    cursor.execute("""
+        SELECT s3_url, predicted_label, confidence,
+               score1, score2, score3, score4, created_at
+        FROM uploads
+        WHERE user_id=%s ORDER BY created_at DESC
+    """, (user_id,))
+    rows = cursor.fetchall()
+    cursor.close()
+    db.close()
 
-    uploads_db = get_uploads_from_db(user_id)
-
-    print("[/myuploads] Count =", len(uploads_db))
-
-    return {
-        "uploads_textfile": uploads_file,
-        "uploads_db": uploads_db
-    }
+    return {"uploads": rows}
