@@ -123,9 +123,16 @@ detector = UIDetector()
 #  AI 분석 함수
 # ========================================
 def run_full_ai_pipeline(img_bytes):
+    print("[AI] Running YOLO detection...")
     detections = detector.run(img_bytes)
+    print("[AI] Detection done")
+
+    print("[AI] Running rule-based algorithms...")
     analysis = run_algorithms(detections)
+    print("[AI] Algorithm analysis done")
+
     message = generate_message(analysis)
+    print("[AI] Message generated")
 
     return {
         "detections": detections,
@@ -141,14 +148,17 @@ async def upload_and_analyze(
     file: UploadFile = File(...),
     authorization: str = Header(None, alias="Authorization"),
 ):
-    print("[POST /upload] called")
-    print("Authorization =", authorization)
+    print("\n========== [POST /upload] ==========")
+    print("[DEBUG] Authorization Header =", authorization)
+    print("[DEBUG] File received filename =", file.filename)
 
     if authorization is None or not authorization.startswith("Bearer "):
         print("[/upload] error missing token")
         raise HTTPException(status_code=401, detail="Missing token")
 
     token = authorization.split(" ")[1]
+    print("[DEBUG] Extracted token:", token)
+
     user = decode_jwt(token)
     if user is None:
         print("[/upload] decode failed")
@@ -159,26 +169,40 @@ async def upload_and_analyze(
 
     # 파일 검사
     ext = file.filename.split(".")[-1].lower()
+    print("[DEBUG] File extension =", ext)
+
     if ext not in ["jpg", "jpeg", "png"]:
+        print("[ERROR] Unsupported file type")
         return JSONResponse({"error": "지원되지 않는 파일 형식입니다."}, status_code=415)
 
     s3_key = f"uploads/{uuid4()}.{ext}"
-    print("[/upload] Upload →", s3_key)
+    print("[DEBUG] S3 upload path =", s3_key)
 
-    s3.upload_fileobj(file.file, BUCKET, s3_key, ExtraArgs={"ContentType": file.content_type})
+    try:
+        s3.upload_fileobj(
+            file.file, BUCKET, s3_key,
+            ExtraArgs={"ContentType": file.content_type}
+        )
+        print("[DEBUG] S3 upload success")
+    except Exception as e:
+        print("[ERROR] S3 upload failed:", e)
+        raise HTTPException(status_code=500, detail="S3 upload error")
 
     url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
-    print("[/upload] S3 URL:", url)
+    print("[DEBUG] S3 URL:", url)
 
-    # 이미지 다운로드 후 AI 분석
+    print("[DEBUG] Downloading uploaded image...")
     img_res = requests.get(url)
     img_bytes = img_res.content
+    print("[DEBUG] Download success, size =", len(img_bytes), "bytes")
 
+    print("[DEBUG] Running AI pipeline...")
     ai_result = run_full_ai_pipeline(img_bytes)
+    print("[DEBUG] AI pipeline complete")
 
-    predicted_label = ai_result["analysis"]["overall_label"] if "overall_label" in ai_result["analysis"] else None
+    predicted_label = ai_result["analysis"].get("overall_label")
 
-    # DB 저장
+    print("[DEBUG] Writing DB record...")
     db = get_db()
     cursor = db.cursor()
     cursor.execute("""
@@ -192,7 +216,9 @@ async def upload_and_analyze(
     db.commit()
     cursor.close()
     db.close()
+    print("[DEBUG] DB insert done")
 
+    print("========== [/upload finished] ==========\n")
     return {
         "user_id": user_id,
         "image_url": url,
@@ -208,16 +234,13 @@ async def upload_and_analyze(
 async def upload_only_for_test(file: UploadFile = File(...)):
     print("[POST /uploadonlyfortest] called")
 
-    # 파일 확장자 검사
     ext = file.filename.split(".")[-1].lower()
     if ext not in ["jpg", "jpeg", "png"]:
         return JSONResponse({"error": "지원되지 않는 파일 형식입니다."}, status_code=415)
 
-    # S3 업로드 경로 생성
     s3_key = f"uploads/{uuid4()}.{ext}"
     print("[/uploadonlyfortest] Upload →", s3_key)
 
-    # S3에 업로드
     s3.upload_fileobj(
         file.file,
         BUCKET,
@@ -225,11 +248,9 @@ async def upload_only_for_test(file: UploadFile = File(...)):
         ExtraArgs={"ContentType": file.content_type},
     )
 
-    # S3 URL 생성
     url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
     print("[/uploadonlyfortest] S3 URL:", url)
 
-    # 업로드된 이미지 다시 다운로드 → AI 처리
     img_res = requests.get(url)
     img_bytes = img_res.content
 
@@ -237,7 +258,6 @@ async def upload_only_for_test(file: UploadFile = File(...)):
     ai_result = run_full_ai_pipeline(img_bytes)
     print("[/uploadonlyfortest] AI pipeline finished")
 
-    # DB 없음 / JWT 없음
     return {
         "file_name": file.filename,
         "s3_url": url,
@@ -267,7 +287,7 @@ async def mypage(authorization: str = Header(None, alias="Authorization")):
     }
 
 # ========================================
-#  업로드 목록 조회
+#  업로드 목록 조회 (배열 반환으로 변경)
 # ========================================
 @app.get("/myuploads", dependencies=[Depends(security)])
 async def my_uploads(authorization: str = Header(None, alias="Authorization")):
@@ -281,6 +301,7 @@ async def my_uploads(authorization: str = Header(None, alias="Authorization")):
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user_id = user["sub"]
+    print("[/myuploads] user_id =", user_id)
 
     db = get_db()
     cursor = db.cursor(dictionary=True)
@@ -294,7 +315,10 @@ async def my_uploads(authorization: str = Header(None, alias="Authorization")):
     cursor.close()
     db.close()
 
-    return {"uploads": rows}
+    print("[/myuploads] rows fetched =", len(rows))
+
+    return rows   # 객체 아닌 배열로 반환
+
 
 # ========================================
 #  Google OAuth Callback
@@ -331,8 +355,6 @@ async def auth_callback(code: str):
     userinfo = userinfo_res.json()
     print("[auth_callback] userinfo =", userinfo)
 
-    # 여기 기존 코드 유지: DB 저장
-    # JWT 생성
     payload = {
         "sub": str(userinfo["id"]),
         "email": userinfo["email"],
@@ -343,7 +365,6 @@ async def auth_callback(code: str):
     jwt_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
     print("[auth_callback] jwt_token =", jwt_token)
 
-    # 수정된 리다이렉트 (배포 주소)
     redirect_to = f"https://mysketchcheck.netlify.app/callback?token={jwt_token}"
     print("[auth_callback] redirect ->", redirect_to)
 
