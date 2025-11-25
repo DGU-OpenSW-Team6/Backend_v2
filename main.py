@@ -300,32 +300,39 @@ async def mypage(authorization: str = Header(None, alias="Authorization")):
 # ========================================
 #  업로드 목록 조회
 # ========================================
+from datetime import datetime
+
 @app.get("/myuploads")
-async def my_uploads(authorization: str = Header(None, alias="Authorization")):
-    print("GET /myuploads")
+def get_my_uploads(authorization: str = Header(None)):
+    print("[GET /myuploads]", authorization)
 
     if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
 
-    user = decode_jwt(authorization.split(" ")[1])
+    token = authorization.split(" ")[1]
+    user = decode_jwt(token)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user_id = user["sub"]
+    user_id = str(user["sub"])
 
-    db = get_db()
-    cursor = db.cursor(dictionary=True)
-    cursor.execute("""
-        SELECT s3_url, predicted_label, confidence,
-               score1, score2, score3, score4, created_at
-        FROM uploads
-        WHERE user_id=%s ORDER BY created_at DESC
-    """, (user_id,))
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        "SELECT * FROM uploads WHERE user_id = %s ORDER BY created_at DESC",
+        (user_id,)
+    )
     rows = cursor.fetchall()
     cursor.close()
-    db.close()
+    conn.close()
+
+    # ===== 날짜 문자열을 ISO8601로 변환 =====
+    for row in rows:
+        if isinstance(row["created_at"], datetime):
+            row["created_at"] = row["created_at"].isoformat()
 
     return rows
+
 
 # ========================================
 #  Google OAuth Callback
