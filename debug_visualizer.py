@@ -164,7 +164,8 @@ async def upload_and_analyze(
         print("[/upload] decode failed")
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user_id = user["sub"]
+    # === 수정된 부분 (INT → 문자열) ===
+    user_id = str(user["sub"])
     print("[/upload] user_id =", user_id)
 
     ext = file.filename.split(".")[-1].lower()
@@ -177,26 +178,51 @@ async def upload_and_analyze(
     s3_key = f"uploads/{uuid4()}.{ext}"
     print("[DEBUG] S3 upload path =", s3_key)
 
+    # 1. S3 업로드
     try:
         s3.upload_fileobj(
             file.file, BUCKET, s3_key,
             ExtraArgs={"ContentType": file.content_type}
         )
+        print("[DEBUG] S3 upload success")
     except Exception as e:
         print("[ERROR] S3 upload failed:", e)
         raise HTTPException(status_code=500, detail="S3 upload failed")
 
+    s3_url = f"https://{BUCKET}.s3.ap-northeast-2.amazonaws.com/{s3_key}"
+    print("[DEBUG] S3 URL:", s3_url)
+
+    # 2. S3에서 다시 다운로드해서 AI 분석
+    file.file.seek(0)
     img_bytes = file.file.read()
     print("[DEBUG] Running AI pipeline…")
 
     ai_result = run_full_ai_pipeline(img_bytes)
     print("[DEBUG] AI pipeline complete")
 
+    # 3. DB 저장
+    print("[DEBUG] Writing DB record...")
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO uploads (user_id, s3_key, s3_url)
+        VALUES (%s, %s, %s)
+        """,
+        (user_id, s3_key, s3_url)
+    )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
     return {
         "file_name": file.filename,
-        "s3_url": f"https://{BUCKET}.s3.ap-northeast-2.amazonaws.com/{s3_key}",
+        "s3_url": s3_url,
         "ai_result": ai_result
     }
+
 
 # ========================================
 #  JWT 검증 후 업로드 기록 조회 (/myuploads)
@@ -213,11 +239,15 @@ def get_my_uploads(authorization: str = Header(None)):
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user_id = user["sub"]
+    # === 수정된 부분 ===
+    user_id = str(user["sub"])
 
     conn = get_db()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM upload_history WHERE user_id = %s", (user_id,))
+    cursor.execute(
+        "SELECT * FROM uploads WHERE user_id = %s ORDER BY created_at DESC",
+        (user_id,)
+    )
     rows = cursor.fetchall()
 
     cursor.close()
