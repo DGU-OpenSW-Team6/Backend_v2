@@ -37,7 +37,6 @@ GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 SECRET_KEY = "MY_SECRET_JWT_KEY"
 ALGORITHM = "HS256"
 
-
 # ========================================
 #  ★ 완전 관대한 CORS 옵션
 # ========================================
@@ -49,14 +48,12 @@ app.add_middleware(
     allow_headers=["*"],        # 모든 헤더 허용
 )
 
-
 # ========================================
-# 모든 응답에 CORS 헤더 강제 추가 (안전장치)
+#  모든 응답에 CORS 헤더 강제 추가
 # ========================================
 @app.middleware("http")
 async def add_cors_headers(request: Request, call_next):
     if request.method == "OPTIONS":
-        # 프리플라이트 무조건 허용
         return JSONResponse(
             status_code=200,
             content={"message": "OK (CORS preflight allowed)"},
@@ -67,14 +64,12 @@ async def add_cors_headers(request: Request, call_next):
                 "Access-Control-Allow-Credentials": "true",
             }
         )
-
     response = await call_next(request)
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "*"
     response.headers["Access-Control-Allow-Credentials"] = "true"
     return response
-
 
 # ========================================
 #  AWS S3
@@ -167,7 +162,7 @@ def run_full_ai_pipeline(img_bytes):
 @app.post("/upload")
 async def upload_and_analyze(
     file: UploadFile = File(...),
-    authorization: str = Header(None, alias="Authorization", default=None),
+    authorization: str = Header(None, alias="Authorization"),
 ):
     print("\n========== [POST /upload] ==========")
     print("[DEBUG] Authorization Header =", authorization)
@@ -246,9 +241,8 @@ async def upload_and_analyze(
         "message": "Upload + AI 평가 완료",
     }
 
-
 # ========================================
-#  로컬 테스트 업로드
+#  로컬 테스트 업로드 (JWT 없음)
 # ========================================
 @app.post("/uploadonlyfortest")
 async def upload_only_for_test(file: UploadFile = File(...)):
@@ -283,12 +277,11 @@ async def upload_only_for_test(file: UploadFile = File(...)):
         "message": "Upload + S3 저장 + AI 분석 완료 (TEST MODE: no DB, no JWT)"
     }
 
-
 # ========================================
 #  마이페이지
 # ========================================
 @app.get("/mypage")
-async def mypage(authorization: str = Header(None, alias="Authorization", default=None)):
+async def mypage(authorization: str = Header(None, alias="Authorization")):
     print("GET /mypage")
 
     if authorization is None or not authorization.startswith("Bearer "):
@@ -304,12 +297,11 @@ async def mypage(authorization: str = Header(None, alias="Authorization", defaul
         "profile_image": user["picture"],
     }
 
-
 # ========================================
-#  업로드 목록 조회 (배열 반환)
+#  업로드 목록 조회
 # ========================================
 @app.get("/myuploads")
-async def my_uploads(authorization: str = Header(None, alias="Authorization", default=None)):
+async def my_uploads(authorization: str = Header(None, alias="Authorization")):
     print("GET /myuploads")
 
     if authorization is None or not authorization.startswith("Bearer "):
@@ -334,7 +326,6 @@ async def my_uploads(authorization: str = Header(None, alias="Authorization", de
     db.close()
 
     return rows
-
 
 # ========================================
 #  Google OAuth Callback
@@ -378,6 +369,6 @@ async def auth_callback(code: str):
 
     jwt_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-    redirect_to = f"https://mysketchcheck.netlify.app/callback?token={jwt_token}"
+    redirect_url = f"https://mysketchcheck.netlify.app/callback?token={jwt_token}"
 
-    return RedirectResponse(url=redirect_to)
+    return RedirectResponse(url=redirect_url)
