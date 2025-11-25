@@ -141,7 +141,7 @@ def run_full_ai_pipeline(img_bytes):
     }
 
 # ========================================
-#  업로드 + AI 통합 API (/upload)
+#  업로드 + AI 통합 API (/upload)-됨
 # ========================================
 @app.post("/upload")
 async def upload_and_analyze(
@@ -225,7 +225,7 @@ async def upload_and_analyze(
 
 
 # ========================================
-#  JWT 검증 후 업로드 기록 조회 (/myuploads)
+#  JWT 검증 후 업로드 기록 조회 (/myuploads)-됨
 # ========================================
 @app.get("/myuploads")
 def get_my_uploads(authorization: str = Header(None)):
