@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Depends
+from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 import torch
@@ -37,23 +37,44 @@ GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 SECRET_KEY = "MY_SECRET_JWT_KEY"
 ALGORITHM = "HS256"
 
-# ========================================
-#  CORS
-# ========================================
-origins = [
-    "https://mysketchcheck.netlify.app",
-    "http://localhost:5173",
-    "https://sketchcheck.shop",
-    "https://www.sketchcheck.shop",
-]
 
+# ========================================
+#  ★ 완전 관대한 CORS 옵션
+# ========================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],        # 모든 origin 허용
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*", "Authorization"],
+    allow_methods=["*"],        # 모든 HTTP 메서드 허용
+    allow_headers=["*"],        # 모든 헤더 허용
 )
+
+
+# ========================================
+# 모든 응답에 CORS 헤더 강제 추가 (안전장치)
+# ========================================
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        # 프리플라이트 무조건 허용
+        return JSONResponse(
+            status_code=200,
+            content={"message": "OK (CORS preflight allowed)"},
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Allow-Methods": "*",
+                "Access-Control-Allow-Credentials": "true",
+            }
+        )
+
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
 
 # ========================================
 #  AWS S3
@@ -143,10 +164,10 @@ def run_full_ai_pipeline(img_bytes):
 # ========================================
 #  업로드 + AI 통합 API (/upload)
 # ========================================
-@app.post("/upload", dependencies=[Depends(security)])
+@app.post("/upload")
 async def upload_and_analyze(
     file: UploadFile = File(...),
-    authorization: str = Header(None, alias="Authorization"),
+    authorization: str = Header(None, alias="Authorization", default=None),
 ):
     print("\n========== [POST /upload] ==========")
     print("[DEBUG] Authorization Header =", authorization)
@@ -167,7 +188,6 @@ async def upload_and_analyze(
     user_id = user["sub"]
     print("[/upload] user_id =", user_id)
 
-    # 파일 검사
     ext = file.filename.split(".")[-1].lower()
     print("[DEBUG] File extension =", ext)
 
@@ -228,7 +248,7 @@ async def upload_and_analyze(
 
 
 # ========================================
-#  로컬 테스트용 업로드 API (인증 없음 / DB 없음 / S3 없음)
+#  로컬 테스트 업로드
 # ========================================
 @app.post("/uploadonlyfortest")
 async def upload_only_for_test(file: UploadFile = File(...)):
@@ -254,9 +274,7 @@ async def upload_only_for_test(file: UploadFile = File(...)):
     img_res = requests.get(url)
     img_bytes = img_res.content
 
-    print("[/uploadonlyfortest] Running AI pipeline...")
     ai_result = run_full_ai_pipeline(img_bytes)
-    print("[/uploadonlyfortest] AI pipeline finished")
 
     return {
         "file_name": file.filename,
@@ -269,8 +287,8 @@ async def upload_only_for_test(file: UploadFile = File(...)):
 # ========================================
 #  마이페이지
 # ========================================
-@app.get("/mypage", dependencies=[Depends(security)])
-async def mypage(authorization: str = Header(None, alias="Authorization")):
+@app.get("/mypage")
+async def mypage(authorization: str = Header(None, alias="Authorization", default=None)):
     print("GET /mypage")
 
     if authorization is None or not authorization.startswith("Bearer "):
@@ -286,11 +304,12 @@ async def mypage(authorization: str = Header(None, alias="Authorization")):
         "profile_image": user["picture"],
     }
 
+
 # ========================================
-#  업로드 목록 조회 (배열 반환으로 변경)
+#  업로드 목록 조회 (배열 반환)
 # ========================================
-@app.get("/myuploads", dependencies=[Depends(security)])
-async def my_uploads(authorization: str = Header(None, alias="Authorization")):
+@app.get("/myuploads")
+async def my_uploads(authorization: str = Header(None, alias="Authorization", default=None)):
     print("GET /myuploads")
 
     if authorization is None or not authorization.startswith("Bearer "):
@@ -301,7 +320,6 @@ async def my_uploads(authorization: str = Header(None, alias="Authorization")):
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user_id = user["sub"]
-    print("[/myuploads] user_id =", user_id)
 
     db = get_db()
     cursor = db.cursor(dictionary=True)
@@ -315,9 +333,7 @@ async def my_uploads(authorization: str = Header(None, alias="Authorization")):
     cursor.close()
     db.close()
 
-    print("[/myuploads] rows fetched =", len(rows))
-
-    return rows   # 객체 아닌 배열로 반환
+    return rows
 
 
 # ========================================
@@ -345,7 +361,6 @@ async def auth_callback(code: str):
 
     tokens = token_res.json()
     access_token = tokens["access_token"]
-    print("[auth_callback] access_token =", access_token)
 
     async with httpx.AsyncClient() as client:
         userinfo_res = await client.get(
@@ -353,7 +368,6 @@ async def auth_callback(code: str):
             headers={"Authorization": f"Bearer {access_token}"},
         )
     userinfo = userinfo_res.json()
-    print("[auth_callback] userinfo =", userinfo)
 
     payload = {
         "sub": str(userinfo["id"]),
@@ -363,9 +377,7 @@ async def auth_callback(code: str):
     }
 
     jwt_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-    print("[auth_callback] jwt_token =", jwt_token)
 
     redirect_to = f"https://mysketchcheck.netlify.app/callback?token={jwt_token}"
-    print("[auth_callback] redirect ->", redirect_to)
 
     return RedirectResponse(url=redirect_to)
