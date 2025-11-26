@@ -217,7 +217,7 @@ async def upload_and_analyze(
     print("[DEBUG] 원본 이미지 URL =", original_url)
 
     # -------------------------------
-    # 2) 원본 이미지 다운로드 (AI 분석용)
+    # 2) AI 분석용 이미지 다운로드
     # -------------------------------
     print("\n[3단계] 원본 이미지 다운로드 → AI 분석 준비")
 
@@ -241,8 +241,24 @@ async def upload_and_analyze(
         print("[ERROR] AI 분석 실패:", e)
         raise HTTPException(status_code=500, detail="AI processing failed")
 
-    print("[DEBUG] AI 분석 결과 일부 샘플 →")
-    print(ai_result.get("summary", "요약 없음"))
+    # -------------------------------
+    # 3-1) 점수 계산 추가
+    # -------------------------------
+    print("\n[4-1단계] 점수 계산 시작")
+
+    try:
+        from algorithms import compute_score
+
+        analysis = ai_result["analysis"]
+        detections = ai_result["detections"]
+
+        score = compute_score(analysis, detections)
+        ai_result["analysis"]["summary"]["score"] = score
+
+        print("[SUCCESS] 점수 계산 완료 → score =", score)
+    except Exception as e:
+        print("[ERROR] 점수 계산 실패:", e)
+        raise HTTPException(status_code=500, detail="Score calculation failed")
 
     # -------------------------------
     # 4) 디버그 이미지 생성
@@ -254,35 +270,24 @@ async def upload_and_analyze(
         from io import BytesIO
 
         debug_buffer = BytesIO()
-
-        # YOLO detections
-        detections = ai_result.get("detections")
+        detections = ai_result["detections"]
         violations = ai_result["analysis"]["violations"]
 
-        # 검증 로그
-        print("[DEBUG] detections 개수 =", len(detections) if detections else "NONE")
+        print("[DEBUG] detections 개수 =", len(detections))
         print("[DEBUG] violations 개수 =", len(violations))
 
-        if not detections:
-            print("[ERROR] detections 값이 비어있음 → YOLO 실패 가능성")
-            raise Exception("detections is None")
-
-        # visualizer는 detections, violations 필요
         draw_debug_image(
             img_bytes,
-            detections,      # 올바른 YOLO 결과
-            violations,      # 알고리즘 위반 결과
-            debug_buffer     # BytesIO (메모리 버퍼)
+            detections,
+            violations,
+            debug_buffer
         )
-
         debug_buffer.seek(0)
 
-        print("[SUCCESS] 디버그 이미지 생성 완료 (메모리 버퍼 준비됨)")
-
+        print("[SUCCESS] 디버그 이미지 생성 완료")
     except Exception as e:
         print("[ERROR] 디버그 이미지 생성 실패:", e)
         raise HTTPException(status_code=500, detail="Debug image generation failed")
-
 
     # -------------------------------
     # 5) 디버그 이미지 S3 업로드
@@ -307,7 +312,7 @@ async def upload_and_analyze(
     print("[DEBUG] 디버그 이미지 URL =", debug_url)
 
     # -------------------------------
-    # 6) DB 저장
+    # DB 저장 (score 포함)
     # -------------------------------
     print("\n[7단계] DB 저장 시작")
 
@@ -328,27 +333,27 @@ async def upload_and_analyze(
             s3_key,
             original_url,
             None, None,
-            0.0, 0.0, 0.0, 0.0,
+            score, 0.0, 0.0, 0.0,    # ← score1에 점수 저장
             debug_url
         ))
 
         db.commit()
         cursor.close()
         db.close()
+
         print("[SUCCESS] DB 저장 완료")
     except Exception as e:
         print("[ERROR] DB 저장 실패:", e)
         raise HTTPException(status_code=500, detail="Database error")
 
     # -------------------------------
-    # 7) 응답 JSON 생성 및 프린트
+    # 8) 프론트로 응답
     # -------------------------------
-    print("\n[8단계] 최종 JSON 생성")
-
     response_json = {
         "user_id": user_id,
         "image_url": original_url,
         "debug_image_url": debug_url,
+        "score": score,
         "ai_result": ai_result,
         "message": "Upload + AI 평가 + 디버그 이미지 생성 + DB 저장 완료"
     }
@@ -358,7 +363,7 @@ async def upload_and_analyze(
 
     print("\n====================== [/upload 완료] ======================\n")
 
-    return response_json
+    return [response_json]
 
 
 # ========================================
