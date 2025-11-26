@@ -38,7 +38,7 @@ SECRET_KEY = "MY_SECRET_JWT_KEY"
 ALGORITHM = "HS256"
 
 # ========================================
-#  ★ 완전 관대한 CORS 옵션
+# 완전 관대한 CORS 옵션
 # ========================================
 app.add_middleware(
     CORSMiddleware,
@@ -156,90 +156,193 @@ def run_full_ai_pipeline(img_bytes):
         "message": message
     }
 
-# ========================================
-#  업로드 + AI 통합 API (/upload)
-# ========================================
 @app.post("/upload")
 async def upload_and_analyze(
     file: UploadFile = File(...),
     authorization: str = Header(None, alias="Authorization"),
 ):
-    print("\n========== [POST /upload] ==========")
-    print("[DEBUG] Authorization Header =", authorization)
-    print("[DEBUG] File received filename =", file.filename)
+    print("\n====================== [POST /upload 시작] ======================")
+
+    # -------------------------------
+    # 0) JWT 인증
+    # -------------------------------
+    print("\n[1단계] JWT 인증 처리 시작")
+    print("[DEBUG] Authorization 헤더 =", authorization)
 
     if authorization is None or not authorization.startswith("Bearer "):
-        print("[/upload] error missing token")
+        print("[ERROR] JWT 토큰 없음 → 401")
         raise HTTPException(status_code=401, detail="Missing token")
 
-    token = authorization.split(" ")[1]
-    print("[DEBUG] Extracted token:", token)
+    try:
+        token = authorization.split(" ")[1]
+        user = decode_jwt(token)
+    except Exception as e:
+        print("[ERROR] JWT 파싱 실패:", e)
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-    user = decode_jwt(token)
     if user is None:
-        print("[/upload] decode failed")
+        print("[ERROR] JWT 해독 실패 → 401")
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user_id = user["sub"]
-    print("[/upload] user_id =", user_id)
+    print("[SUCCESS] JWT 인증 완료 → user_id =", user_id)
+
+    # -------------------------------
+    # 1) 원본 이미지 S3 업로드
+    # -------------------------------
+    print("\n[2단계] 원본 이미지 S3 업로드 시작")
+    print("[DEBUG] 파일명 =", file.filename)
 
     ext = file.filename.split(".")[-1].lower()
-    print("[DEBUG] File extension =", ext)
-
     if ext not in ["jpg", "jpeg", "png"]:
-        print("[ERROR] Unsupported file type")
+        print("[ERROR] 이미지 확장자 불가:", ext)
         return JSONResponse({"error": "지원되지 않는 파일 형식입니다."}, status_code=415)
 
     s3_key = f"uploads/{uuid4()}.{ext}"
-    print("[DEBUG] S3 upload path =", s3_key)
+    print("[DEBUG] 업로드 경로 =", s3_key)
 
     try:
         s3.upload_fileobj(
-            file.file, BUCKET, s3_key,
+            file.file,
+            BUCKET,
+            s3_key,
             ExtraArgs={"ContentType": file.content_type}
         )
-        print("[DEBUG] S3 upload success")
+        print("[SUCCESS] 원본 이미지 업로드 완료")
     except Exception as e:
-        print("[ERROR] S3 upload failed:", e)
+        print("[ERROR] 원본 이미지 업로드 실패:", e)
         raise HTTPException(status_code=500, detail="S3 upload error")
 
-    url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
-    print("[DEBUG] S3 URL:", url)
+    original_url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{s3_key}"
+    print("[DEBUG] 원본 이미지 URL =", original_url)
 
-    print("[DEBUG] Downloading uploaded image...")
-    img_res = requests.get(url)
-    img_bytes = img_res.content
-    print("[DEBUG] Download success, size =", len(img_bytes), "bytes")
+    # -------------------------------
+    # 2) 원본 이미지 다운로드 (AI 분석용)
+    # -------------------------------
+    print("\n[3단계] 원본 이미지 다운로드 → AI 분석 준비")
 
-    print("[DEBUG] Running AI pipeline...")
-    ai_result = run_full_ai_pipeline(img_bytes)
-    print("[DEBUG] AI pipeline complete")
+    try:
+        img_res = requests.get(original_url)
+        img_bytes = img_res.content
+        print("[SUCCESS] 다운로드 완료 (크기:", len(img_bytes), "bytes )")
+    except Exception as e:
+        print("[ERROR] 다운로드 실패:", e)
+        raise HTTPException(status_code=500, detail="Image download error")
 
-    predicted_label = ai_result["analysis"].get("overall_label")
+    # -------------------------------
+    # 3) AI 분석 (YOLO + rule 기반 알고리즘)
+    # -------------------------------
+    print("\n[4단계] AI 전체 파이프라인 실행 시작")
 
-    print("[DEBUG] Writing DB record...")
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute("""
-        INSERT INTO uploads (user_id, s3_key, s3_url,
-            predicted_label, confidence, score1, score2, score3, score4)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """, (
-        user_id, s3_key, url,
-        None, None, 0.0, 0.0, 0.0, 0.0
-    ))
-    db.commit()
-    cursor.close()
-    db.close()
-    print("[DEBUG] DB insert done")
+    try:
+        ai_result = run_full_ai_pipeline(img_bytes)
+        print("[SUCCESS] AI 분석 완료")
+    except Exception as e:
+        print("[ERROR] AI 분석 실패:", e)
+        raise HTTPException(status_code=500, detail="AI processing failed")
 
-    print("========== [/upload finished] ==========\n")
-    return {
+    print("[DEBUG] AI 분석 결과 일부 샘플 →")
+    print(ai_result.get("summary", "요약 없음"))
+
+    # -------------------------------
+    # 4) 디버그 이미지 생성
+    # -------------------------------
+    print("\n[5단계] 디버그 이미지 생성 시작")
+
+    try:
+        from debug_visualizer import draw_debug_image
+        from io import BytesIO
+
+        debug_buffer = BytesIO()
+
+        violations = ai_result["analysis"]["violations"]
+        detections = ai_result["analysis"]["detections"] if "detections" in ai_result["analysis"] else None
+
+        # visualizer는 detections, violations 두 개가 필요함
+        draw_debug_image(img_bytes, ai_result["detections"], violations, debug_buffer)
+        debug_buffer.seek(0)
+
+        print("[SUCCESS] 디버그 이미지 생성 완료 (메모리 버퍼 준비됨)")
+    except Exception as e:
+        print("[ERROR] 디버그 이미지 생성 실패:", e)
+        raise HTTPException(status_code=500, detail="Debug image generation failed")
+
+    # -------------------------------
+    # 5) 디버그 이미지 S3 업로드
+    # -------------------------------
+    print("\n[6단계] 디버그 이미지 S3 업로드 시작")
+
+    debug_key = f"debug/{uuid4()}.png"
+
+    try:
+        s3.upload_fileobj(
+            debug_buffer,
+            BUCKET,
+            debug_key,
+            ExtraArgs={"ContentType": "image/png"}
+        )
+        print("[SUCCESS] 디버그 이미지 업로드 완료")
+    except Exception as e:
+        print("[ERROR] 디버그 이미지 업로드 실패:", e)
+        raise HTTPException(status_code=500, detail="Debug S3 upload error")
+
+    debug_url = f"https://{BUCKET}.s3.{os.getenv('AWS_REGION')}.amazonaws.com/{debug_key}"
+    print("[DEBUG] 디버그 이미지 URL =", debug_url)
+
+    # -------------------------------
+    # 6) DB 저장
+    # -------------------------------
+    print("\n[7단계] DB 저장 시작")
+
+    try:
+        db = get_db()
+        cursor = db.cursor()
+
+        cursor.execute("""
+            INSERT INTO uploads (
+                user_id, s3_key, s3_url,
+                predicted_label, confidence,
+                score1, score2, score3, score4,
+                debug_image_url
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (
+            user_id,
+            s3_key,
+            original_url,
+            None, None,
+            0.0, 0.0, 0.0, 0.0,
+            debug_url
+        ))
+
+        db.commit()
+        cursor.close()
+        db.close()
+        print("[SUCCESS] DB 저장 완료")
+    except Exception as e:
+        print("[ERROR] DB 저장 실패:", e)
+        raise HTTPException(status_code=500, detail="Database error")
+
+    # -------------------------------
+    # 7) 응답 JSON 생성 및 프린트
+    # -------------------------------
+    print("\n[8단계] 최종 JSON 생성")
+
+    response_json = {
         "user_id": user_id,
-        "image_url": url,
+        "image_url": original_url,
+        "debug_image_url": debug_url,
         "ai_result": ai_result,
-        "message": "Upload + AI 평가 완료",
+        "message": "Upload + AI 평가 + 디버그 이미지 생성 + DB 저장 완료"
     }
+
+    print("\n========== [프론트로 보낼 최종 JSON] ==========")
+    print(response_json)
+
+    print("\n====================== [/upload 완료] ======================\n")
+
+    return response_json
+
 
 # ========================================
 #  로컬 테스트 업로드 (JWT 없음)
@@ -304,34 +407,90 @@ from datetime import datetime
 
 @app.get("/myuploads")
 def get_my_uploads(authorization: str = Header(None)):
-    print("[GET /myuploads]", authorization)
+    print("\n====================== [GET /myuploads 시작] ======================")
+
+    # -------------------------------
+    # 1) JWT 인증
+    # -------------------------------
+    print("\n[1단계] JWT 인증 시작")
+    print("[DEBUG] Authorization Header =", authorization)
 
     if authorization is None or not authorization.startswith("Bearer "):
+        print("[ERROR] 토큰 없음 → 401")
         raise HTTPException(status_code=401, detail="Missing token")
 
     token = authorization.split(" ")[1]
-    user = decode_jwt(token)
+
+    try:
+        user = decode_jwt(token)
+    except Exception as e:
+        print("[ERROR] JWT 파싱 실패:", e)
+        raise HTTPException(status_code=401, detail="Invalid token")
+
     if user is None:
+        print("[ERROR] JWT 해독 실패 → 401")
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user_id = str(user["sub"])
+    print("[SUCCESS] JWT 인증 완료 → user_id =", user_id)
 
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute(
-        "SELECT * FROM uploads WHERE user_id = %s ORDER BY created_at DESC",
-        (user_id,)
-    )
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    # -------------------------------
+    # 2) DB 조회
+    # -------------------------------
+    print("\n[2단계] DB 조회 시작")
+    print("[DEBUG] 쿼리 실행: SELECT * FROM uploads WHERE user_id =", user_id)
 
-    # ===== 날짜 문자열을 ISO8601로 변환 =====
-    for row in rows:
-        if isinstance(row["created_at"], datetime):
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute(
+            "SELECT * FROM uploads WHERE user_id = %s ORDER BY created_at DESC",
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+        print("[SUCCESS] DB 조회 완료 → 총", len(rows), "개")
+    except Exception as e:
+        print("[ERROR] DB 조회 실패:", e)
+        raise HTTPException(status_code=500, detail="Database error")
+
+    # -------------------------------
+    # 3) DB 데이터 가공 (날짜 변환 + debug_image_url 포함되는지 확인)
+    # -------------------------------
+    print("\n[3단계] DB 데이터 가공 시작")
+
+    from datetime import datetime
+
+    for idx, row in enumerate(rows):
+        print(f"\n[DEBUG] Raw Row #{idx} =", row)
+
+        if isinstance(row.get("created_at"), datetime):
             row["created_at"] = row["created_at"].isoformat()
 
-    return rows
+        # debug_image_url 포함 확인 로그
+        if "debug_image_url" in row:
+            print("[DEBUG] debug_image_url 존재 =", row["debug_image_url"])
+        else:
+            print("[WARN] debug_image_url 컬럼이 없습니다. DB 스키마 확인 필요.")
+
+    # -------------------------------
+    # 4) 최종 JSON 생성
+    # -------------------------------
+    print("\n[4단계] 최종 응답 JSON 생성")
+
+    response_json = rows
+
+    print("\n========== [프론트로 보낼 최종 JSON] ==========")
+    print(response_json)
+
+    print("\n====================== [/myuploads 완료] ======================\n")
+
+    return response_json
+
 
 
 # ========================================
