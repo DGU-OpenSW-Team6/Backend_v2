@@ -91,5 +91,6 @@ def draw_debug_image(img_bytes, detections, violations, output_path):
 
             draw.text((cls_x, cls_y), cls_text, fill=violation_color, font=font_small)
 
-    img.save(output_path)
+        # PNG 형식으로 저장 (BytesIO일 때는 format 필수)
+    img.save(output_path, format="PNG")
     print(f"[DEBUG] Saved annotated image → {output_path}")
