@@ -255,17 +255,34 @@ async def upload_and_analyze(
 
         debug_buffer = BytesIO()
 
+        # YOLO detections
+        detections = ai_result.get("detections")
         violations = ai_result["analysis"]["violations"]
-        detections = ai_result["analysis"]["detections"] if "detections" in ai_result["analysis"] else None
 
-        # visualizer는 detections, violations 두 개가 필요함
-        draw_debug_image(img_bytes, ai_result["detections"], violations, debug_buffer)
+        # 검증 로그
+        print("[DEBUG] detections 개수 =", len(detections) if detections else "NONE")
+        print("[DEBUG] violations 개수 =", len(violations))
+
+        if not detections:
+            print("[ERROR] detections 값이 비어있음 → YOLO 실패 가능성")
+            raise Exception("detections is None")
+
+        # visualizer는 detections, violations 필요
+        draw_debug_image(
+            img_bytes,
+            detections,      # 올바른 YOLO 결과
+            violations,      # 알고리즘 위반 결과
+            debug_buffer     # BytesIO (메모리 버퍼)
+        )
+
         debug_buffer.seek(0)
 
         print("[SUCCESS] 디버그 이미지 생성 완료 (메모리 버퍼 준비됨)")
+
     except Exception as e:
         print("[ERROR] 디버그 이미지 생성 실패:", e)
         raise HTTPException(status_code=500, detail="Debug image generation failed")
+
 
     # -------------------------------
     # 5) 디버그 이미지 S3 업로드
@@ -407,90 +424,34 @@ from datetime import datetime
 
 @app.get("/myuploads")
 def get_my_uploads(authorization: str = Header(None)):
-    print("\n====================== [GET /myuploads 시작] ======================")
-
-    # -------------------------------
-    # 1) JWT 인증
-    # -------------------------------
-    print("\n[1단계] JWT 인증 시작")
-    print("[DEBUG] Authorization Header =", authorization)
+    print("[GET /myuploads]", authorization)
 
     if authorization is None or not authorization.startswith("Bearer "):
-        print("[ERROR] 토큰 없음 → 401")
         raise HTTPException(status_code=401, detail="Missing token")
 
     token = authorization.split(" ")[1]
-
-    try:
-        user = decode_jwt(token)
-    except Exception as e:
-        print("[ERROR] JWT 파싱 실패:", e)
-        raise HTTPException(status_code=401, detail="Invalid token")
-
+    user = decode_jwt(token)
     if user is None:
-        print("[ERROR] JWT 해독 실패 → 401")
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user_id = str(user["sub"])
-    print("[SUCCESS] JWT 인증 완료 → user_id =", user_id)
 
-    # -------------------------------
-    # 2) DB 조회
-    # -------------------------------
-    print("\n[2단계] DB 조회 시작")
-    print("[DEBUG] 쿼리 실행: SELECT * FROM uploads WHERE user_id =", user_id)
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        "SELECT * FROM uploads WHERE user_id = %s ORDER BY created_at DESC",
+        (user_id,)
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
 
-    try:
-        conn = get_db()
-        cursor = conn.cursor(dictionary=True)
-
-        cursor.execute(
-            "SELECT * FROM uploads WHERE user_id = %s ORDER BY created_at DESC",
-            (user_id,)
-        )
-        rows = cursor.fetchall()
-
-        cursor.close()
-        conn.close()
-
-        print("[SUCCESS] DB 조회 완료 → 총", len(rows), "개")
-    except Exception as e:
-        print("[ERROR] DB 조회 실패:", e)
-        raise HTTPException(status_code=500, detail="Database error")
-
-    # -------------------------------
-    # 3) DB 데이터 가공 (날짜 변환 + debug_image_url 포함되는지 확인)
-    # -------------------------------
-    print("\n[3단계] DB 데이터 가공 시작")
-
-    from datetime import datetime
-
-    for idx, row in enumerate(rows):
-        print(f"\n[DEBUG] Raw Row #{idx} =", row)
-
-        if isinstance(row.get("created_at"), datetime):
+    # ===== 날짜 문자열을 ISO8601로 변환 =====
+    for row in rows:
+        if isinstance(row["created_at"], datetime):
             row["created_at"] = row["created_at"].isoformat()
 
-        # debug_image_url 포함 확인 로그
-        if "debug_image_url" in row:
-            print("[DEBUG] debug_image_url 존재 =", row["debug_image_url"])
-        else:
-            print("[WARN] debug_image_url 컬럼이 없습니다. DB 스키마 확인 필요.")
-
-    # -------------------------------
-    # 4) 최종 JSON 생성
-    # -------------------------------
-    print("\n[4단계] 최종 응답 JSON 생성")
-
-    response_json = rows
-
-    print("\n========== [프론트로 보낼 최종 JSON] ==========")
-    print(response_json)
-
-    print("\n====================== [/myuploads 완료] ======================\n")
-
-    return response_json
-
+    return rows
 
 
 # ========================================
