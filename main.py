@@ -230,7 +230,7 @@ async def upload_and_analyze(
         raise HTTPException(status_code=500, detail="Image download error")
 
     # -------------------------------
-    # 3) AI 분석 (YOLO + rule 기반 알고리즘)
+    # 3) AI 분석
     # -------------------------------
     print("\n[4단계] AI 전체 파이프라인 실행 시작")
 
@@ -242,7 +242,7 @@ async def upload_and_analyze(
         raise HTTPException(status_code=500, detail="AI processing failed")
 
     # -------------------------------
-    # 3-1) 점수 계산 추가
+    # 3-1) 점수 계산
     # -------------------------------
     print("\n[4-1단계] 점수 계산 시작")
 
@@ -312,7 +312,7 @@ async def upload_and_analyze(
     print("[DEBUG] 디버그 이미지 URL =", debug_url)
 
     # -------------------------------
-    # DB 저장 (score 포함)
+    # 6) DB 저장
     # -------------------------------
     print("\n[7단계] DB 저장 시작")
 
@@ -322,18 +322,19 @@ async def upload_and_analyze(
 
         cursor.execute("""
             INSERT INTO uploads (
-                user_id, s3_key, s3_url,
+                user_id, s3_key, s3_url, filename,
                 predicted_label, confidence,
                 score1, score2, score3, score4,
                 debug_image_url
             )
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
             user_id,
             s3_key,
             original_url,
+            file.filename,
             None, None,
-            score, 0.0, 0.0, 0.0,    # ← score1에 점수 저장
+            score, 0.0, 0.0, 0.0,
             debug_url
         ))
 
@@ -347,12 +348,13 @@ async def upload_and_analyze(
         raise HTTPException(status_code=500, detail="Database error")
 
     # -------------------------------
-    # 8) 프론트로 응답
+    # 7) 프론트 응답
     # -------------------------------
     response_json = {
         "user_id": user_id,
         "image_url": original_url,
         "debug_image_url": debug_url,
+        "filename": file.filename,
         "score": score,
         "ai_result": ai_result,
         "message": "Upload + AI 평가 + 디버그 이미지 생성 + DB 저장 완료"
@@ -360,7 +362,6 @@ async def upload_and_analyze(
 
     print("\n========== [프론트로 보낼 최종 JSON] ==========")
     print(response_json)
-
     print("\n====================== [/upload 완료] ======================\n")
 
     return [response_json]
@@ -427,11 +428,17 @@ async def mypage(authorization: str = Header(None, alias="Authorization")):
 # ========================================
 from datetime import datetime
 
+from datetime import datetime
+from fastapi import Header, HTTPException
+
 @app.get("/myuploads")
 def get_my_uploads(authorization: str = Header(None)):
-    print("[GET /myuploads]", authorization)
 
+    # -------------------------------
+    # 1) JWT 인증
+    # -------------------------------
     if authorization is None or not authorization.startswith("Bearer "):
+
         raise HTTPException(status_code=401, detail="Missing token")
 
     token = authorization.split(" ")[1]
@@ -441,22 +448,51 @@ def get_my_uploads(authorization: str = Header(None)):
 
     user_id = str(user["sub"])
 
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute(
-        "SELECT * FROM uploads WHERE user_id = %s ORDER BY created_at DESC",
-        (user_id,)
-    )
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    # -------------------------------
+    # 2) DB 조회
+    # -------------------------------
 
-    # ===== 날짜 문자열을 ISO8601로 변환 =====
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+
+        query = """
+            SELECT 
+                id,
+                user_id,
+                s3_key,
+                s3_url,
+                filename,
+                score1,
+                score2,
+                score3,
+                score4,
+                debug_image_url,
+                created_at
+            FROM uploads
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+        """
+
+        cursor.execute(query, (user_id,))
+        rows = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Database error")
+
+    # -------------------------------
+    # 3) created_at → ISO 문자열 변환
+    # -------------------------------
+
     for row in rows:
-        if isinstance(row["created_at"], datetime):
+        if isinstance(row.get("created_at"), datetime):
             row["created_at"] = row["created_at"].isoformat()
 
     return rows
+
 
 
 # ========================================
