@@ -84,15 +84,6 @@ def target_size_test(detections, min_size=44, max_size=200):
                 "detail": f"{cls} too small ({round(w, 1)}x{round(h, 1)})"
             })
 
-        if w > max_size or h > max_size:
-            violations.append({
-                "id": det["id"],
-                "element": cls,
-                "bbox": det["bbox"],
-                "reason": "too_large",
-                "detail": f"{cls} too large ({round(w, 1)}x{round(h, 1)})"
-            })
-
     return {
         "passed": len(violations) == 0,
         "violations": violations
